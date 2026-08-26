@@ -6,6 +6,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0a0a12">
+<link rel="manifest" href="manifest.json">
 <title>T-Blocks v2.0 — 4ayka Studio</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
@@ -957,6 +958,8 @@ setInterval(()=>{
 },MOVE_REPEAT);
 
 document.addEventListener('touchmove',e=>{if(e.target.closest('#game-container'))e.preventDefault()},{passive:false});
+
+if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(()=>{})}
 </script>
 </body>
 </html>

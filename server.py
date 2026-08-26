@@ -213,6 +213,82 @@ def get_tunnel_url():
     return {"url": TUNNEL_URL}
 
 
+# ---- VISITOR COUNTER & ONLINE ----
+
+_visitor_db_lock = threading.Lock()
+_visitors_today = 0
+_visitors_date = ""
+_online_users = {}
+_ONLINE_TIMEOUT = 60
+
+def _get_visitor_db():
+    path = os.path.join(os.path.dirname(__file__), "visitors.db")
+    eng = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
+    Base2 = declarative_base()
+    class VisitorLog(Base2):
+        __tablename__ = "visitors"
+        id = Column(Integer, primary_key=True, index=True)
+        ip = Column(String(64))
+        page = Column(String(128))
+        timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
+    Base2.metadata.create_all(bind=eng)
+    return sessionmaker(bind=eng), VisitorLog
+
+_visitor_session, VisitorLog = _get_visitor_db()
+
+
+@app.post("/api/visit")
+def record_visit(page: str = "/", ip: str = ""):
+    global _visitors_today, _visitors_date
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    with _visitor_db_lock:
+        if _visitors_date != today:
+            _visitors_today = 0
+            _visitors_date = today
+        _visitors_today += 1
+        db = _visitor_session()
+        try:
+            db.add(VisitorLog(ip=ip[:64], page=page[:128]))
+            db.commit()
+        finally:
+            db.close()
+    return {"ok": True, "visitors_today": _visitors_today}
+
+
+@app.get("/api/visitors")
+def get_visitors():
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    db = _visitor_session()
+    try:
+        total = db.query(func.count(VisitorLog.id)).scalar() or 0
+        today_count = db.query(func.count(VisitorLog.id)).filter(
+            func.date(VisitorLog.timestamp) == today
+        ).scalar() or 0
+    finally:
+        db.close()
+    return {"total": total, "today": today_count}
+
+
+@app.post("/api/online")
+def heartbeat_online(session_id: str = ""):
+    _online_users[session_id[:32]] = time.time()
+    _cleanup_online()
+    return {"online": len(_online_users)}
+
+
+def _cleanup_online():
+    now = time.time()
+    expired = [k for k, v in _online_users.items() if now - v > _ONLINE_TIMEOUT]
+    for k in expired:
+        del _online_users[k]
+
+
+@app.get("/api/online")
+def get_online():
+    _cleanup_online()
+    return {"online": len(_online_users)}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)

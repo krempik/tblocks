@@ -189,7 +189,7 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
       <div id="powerups-list"></div>
     </div>
     <div class="panel" style="text-align:center">
-      <div class="sub">T-BLOCKS v2.0</div>
+      <div class="sub version-static">T-BLOCKS v2.0.1</div>
       <div class="sub">4ayka Studio</div>
     </div>
   </div>
@@ -204,6 +204,7 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
 <div id="mode-select">
   <h1>T-BLOCKS</h1>
   <div class="studio">4ayka Studio</div>
+  <div class="version-static" style="font-size:11px;color:var(--muted);margin-bottom:8px">v2.0.1</div>
   <div class="modes">
     <div class="mode-btn" onclick="startGame('classic')">
       <div class="mode-name">Классический</div>
@@ -960,6 +961,11 @@ setInterval(()=>{
 document.addEventListener('touchmove',e=>{if(e.target.closest('#game-container'))e.preventDefault()},{passive:false});
 
 if('serviceWorker' in navigator){navigator.serviceWorker.register('sw.js').catch(()=>{})}
+
+// Fetch version
+fetch('/api/version').then(r=>r.json()).then(d=>{
+  document.querySelectorAll('.version-static').forEach(el=>el.textContent='v'+d.version);
+}).catch(()=>{});
 </script>
 </body>
 </html>

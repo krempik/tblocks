@@ -5,19 +5,33 @@ import subprocess
 import threading
 import re
 from typing import Optional
+from functools import lru_cache
+from contextlib import contextmanager
+from pathlib import Path
 
-from fastapi import FastAPI, Query
+from fastapi import FastAPI, Query, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, func
+from pydantic import BaseModel, field_validator
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, func, Index
 from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "leaderboard.db")
-engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False}, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
+
+VERSION_FILE = Path(__file__).parent / "VERSION"
+def get_version():
+    try:
+        return VERSION_FILE.read_text().strip()
+    except Exception:
+        return "2.0.1"
+
+_rate_limit_lock = threading.Lock()
+_visitor_lock = threading.Lock()
+_online_lock = threading.Lock()
 
 
 class Score(Base):
@@ -30,6 +44,18 @@ class Score(Base):
     level = Column(Integer, default=1)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
+    __table_args__ = (
+        Index("ix_scores_mode_score", "mode", "score"),
+    )
+
+
+class VisitorLog(Base):
+    __tablename__ = "visitors"
+    id = Column(Integer, primary_key=True, index=True)
+    ip = Column(String(64))
+    page = Column(String(128))
+    timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
+
 
 Base.metadata.create_all(bind=engine)
 
@@ -38,7 +64,33 @@ TUNNEL_URL: Optional[str] = None
 _tunnel_process: Optional[subprocess.Popen] = None
 HOST_START_TIME = time.time()
 
+_rate_limit_store: dict[str, list[float]] = {}
+_RATE_LIMIT_WINDOW = 60
+_RATE_LIMIT_MAX_REQUESTS = 60
 
+
+def _check_rate_limit(client_ip: str) -> bool:
+    now = time.time()
+    window_start = now - _RATE_LIMIT_WINDOW
+    with _rate_limit_lock:
+        requests = _rate_limit_store.get(client_ip, [])
+        while requests and requests[0] < window_start:
+            requests.pop(0)
+        if len(requests) >= _RATE_LIMIT_MAX_REQUESTS:
+            return False
+        requests.append(now)
+        _rate_limit_store[client_ip] = requests
+    return True
+
+
+def _get_client_ip(request: Request) -> str:
+    forwarded = request.headers.get("X-Forwarded-For")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
+
+@lru_cache(maxsize=1)
 def _find_cloudflared() -> Optional[str]:
     path = os.path.join(os.path.dirname(__file__), "cloudflared.exe")
     if os.path.isfile(path):
@@ -116,6 +168,21 @@ app.add_middleware(
 )
 
 
+@app.get("/api/version")
+def get_version_endpoint():
+    return {"version": get_version()}
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    if request.url.path.startswith("/api/"):
+        client_ip = _get_client_ip(request)
+        if not _check_rate_limit(client_ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    response = await call_next(request)
+    return response
+
+
 class ScoreRequest(BaseModel):
     name: str
     mode: str
@@ -123,22 +190,49 @@ class ScoreRequest(BaseModel):
     lines: int = 0
     level: int = 1
 
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, v: str) -> str:
+        return v.strip()[:32] if v.strip() else "Anonymous"
+
+    @field_validator("mode")
+    @classmethod
+    def validate_mode(cls, v: str) -> str:
+        return v if v in ("classic", "marathon", "boss", "ultra") else "classic"
+
+    @field_validator("score")
+    @classmethod
+    def validate_score(cls, v: int) -> int:
+        return max(0, v)
+
+    @field_validator("lines", "level")
+    @classmethod
+    def validate_non_negative(cls, v: int) -> int:
+        return max(0, v)
+
+
+VALID_MODES = ("classic", "marathon", "boss", "ultra")
+
+
+def _get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
+
 
 @app.post("/api/score")
 def submit_score(req: ScoreRequest):
-    name = req.name.strip()[:32] if req.name.strip() else "Anonymous"
-    mode = req.mode if req.mode in ("classic", "marathon", "boss", "ultra") else "classic"
-    score = max(0, req.score)
-
     db = SessionLocal()
     try:
-        s = Score(name=name, mode=mode, score=score, lines=req.lines, level=req.level)
+        s = Score(name=req.name, mode=req.mode, score=req.score, lines=req.lines, level=req.level)
         db.add(s)
         db.commit()
 
         position = db.query(func.count(Score.id)).filter(
-            Score.mode == mode,
-            Score.score > score,
+            Score.mode == req.mode,
+            Score.score > req.score,
         ).scalar() + 1
 
         return {"ok": True, "position": position, "id": s.id}
@@ -148,7 +242,7 @@ def submit_score(req: ScoreRequest):
 
 @app.get("/api/leaderboard")
 def get_leaderboard(mode: str = "classic", limit: int = Query(50, le=100)):
-    mode = mode if mode in ("classic", "marathon", "boss", "ultra") else "classic"
+    mode = mode if mode in VALID_MODES else "classic"
     db = SessionLocal()
     try:
         rows = (
@@ -175,7 +269,8 @@ def get_leaderboard(mode: str = "classic", limit: int = Query(50, le=100)):
 
 @app.get("/api/leaderboard/position")
 def get_position(mode: str, score: int):
-    mode = mode if mode in ("classic", "marathon", "boss", "ultra") else "classic"
+    mode = mode if mode in VALID_MODES else "classic"
+    score = max(0, score)
     db = SessionLocal()
     try:
         position = db.query(func.count(Score.id)).filter(
@@ -195,7 +290,7 @@ def get_stats():
         total_games = db.query(func.count(Score.id)).scalar() or 0
         total_players = db.query(func.count(func.distinct(Score.name))).scalar() or 0
         best_scores = {}
-        for mode in ("classic", "marathon", "boss", "ultra"):
+        for mode in VALID_MODES:
             row = db.query(func.max(Score.score)).filter(Score.mode == mode).scalar()
             best_scores[mode] = row or 0
         return {
@@ -215,40 +310,26 @@ def get_tunnel_url():
 
 # ---- VISITOR COUNTER & ONLINE ----
 
-_visitor_db_lock = threading.Lock()
 _visitors_today = 0
 _visitors_date = ""
-_online_users = {}
+_online_users: dict[str, float] = {}
 _ONLINE_TIMEOUT = 60
-
-def _get_visitor_db():
-    path = os.path.join(os.path.dirname(__file__), "visitors.db")
-    eng = create_engine(f"sqlite:///{path}", connect_args={"check_same_thread": False})
-    Base2 = declarative_base()
-    class VisitorLog(Base2):
-        __tablename__ = "visitors"
-        id = Column(Integer, primary_key=True, index=True)
-        ip = Column(String(64))
-        page = Column(String(128))
-        timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc))
-    Base2.metadata.create_all(bind=eng)
-    return sessionmaker(bind=eng), VisitorLog
-
-_visitor_session, VisitorLog = _get_visitor_db()
 
 
 @app.post("/api/visit")
-def record_visit(page: str = "/", ip: str = ""):
+def record_visit(request: Request, page: str = "/", ip: str = ""):
     global _visitors_today, _visitors_date
+    client_ip = ip or _get_client_ip(request)
+    page = page[:128]
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    with _visitor_db_lock:
+    with _visitor_lock:
         if _visitors_date != today:
             _visitors_today = 0
             _visitors_date = today
         _visitors_today += 1
-        db = _visitor_session()
+        db = SessionLocal()
         try:
-            db.add(VisitorLog(ip=ip[:64], page=page[:128]))
+            db.add(VisitorLog(ip=client_ip[:64], page=page))
             db.commit()
         finally:
             db.close()
@@ -258,7 +339,7 @@ def record_visit(page: str = "/", ip: str = ""):
 @app.get("/api/visitors")
 def get_visitors():
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    db = _visitor_session()
+    db = SessionLocal()
     try:
         total = db.query(func.count(VisitorLog.id)).scalar() or 0
         today_count = db.query(func.count(VisitorLog.id)).filter(
@@ -270,13 +351,17 @@ def get_visitors():
 
 
 @app.post("/api/online")
-def heartbeat_online(session_id: str = ""):
-    _online_users[session_id[:32]] = time.time()
-    _cleanup_online()
+def heartbeat_online(request: Request, session_id: str = ""):
+    if not session_id:
+        session_id = _get_client_ip(request)
+    session_id = session_id[:32]
+    with _online_lock:
+        _online_users[session_id] = time.time()
+        _cleanup_online_locked()
     return {"online": len(_online_users)}
 
 
-def _cleanup_online():
+def _cleanup_online_locked():
     now = time.time()
     expired = [k for k, v in _online_users.items() if now - v > _ONLINE_TIMEOUT]
     for k in expired:
@@ -285,8 +370,9 @@ def _cleanup_online():
 
 @app.get("/api/online")
 def get_online():
-    _cleanup_online()
-    return {"online": len(_online_users)}
+    with _online_lock:
+        _cleanup_online_locked()
+        return {"online": len(_online_users)}
 
 
 if __name__ == "__main__":

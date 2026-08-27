@@ -50,6 +50,20 @@ def test_submit_score_invalid_mode():
     assert r.json()["ok"] is True
 
 
+def test_submit_score_validation():
+    r = client.post("/api/score", json={
+        "name": "",
+        "mode": "classic",
+        "score": -100,
+        "lines": -5,
+        "level": -1
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ok"] is True
+    assert data["id"] > 0
+
+
 def test_leaderboard_has_score():
     client.post("/api/score", json={
         "name": "LeaderTest",
@@ -67,3 +81,24 @@ def test_position():
     data = r.json()
     assert "position" in data
     assert "total" in data
+
+
+def test_visitors():
+    r = client.post("/api/visit", params={"page": "/test"})
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+
+    r = client.get("/api/visitors")
+    assert r.status_code == 200
+    data = r.json()
+    assert "total" in data
+    assert "today" in data
+
+
+def test_online():
+    r = client.post("/api/online", params={"session_id": "test123"})
+    assert r.status_code == 200
+    assert "online" in r.json()
+
+    r = client.get("/api/online")
+    assert r.status_code == 200

@@ -27,7 +27,7 @@ def get_version():
     try:
         return VERSION_FILE.read_text().strip()
     except Exception:
-        return "2.0.1"
+        return "4.0.0"
 
 _rate_limit_lock = threading.Lock()
 _visitor_lock = threading.Lock()
@@ -73,6 +73,9 @@ def _check_rate_limit(client_ip: str) -> bool:
     now = time.time()
     window_start = now - _RATE_LIMIT_WINDOW
     with _rate_limit_lock:
+        stale = [k for k, v in _rate_limit_store.items() if not v or (v and v[-1] < window_start)]
+        for k in stale:
+            del _rate_limit_store[k]
         requests = _rate_limit_store.get(client_ip, [])
         while requests and requests[0] < window_start:
             requests.pop(0)
@@ -162,7 +165,7 @@ app = FastAPI(title="T-Blocks Leaderboard", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -214,14 +217,6 @@ class ScoreRequest(BaseModel):
 VALID_MODES = ("classic", "marathon", "boss", "ultra")
 
 
-def _get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-
 @app.post("/api/score")
 def submit_score(req: ScoreRequest):
     db = SessionLocal()
@@ -241,7 +236,7 @@ def submit_score(req: ScoreRequest):
 
 
 @app.get("/api/leaderboard")
-def get_leaderboard(mode: str = "classic", limit: int = Query(50, le=100)):
+def get_leaderboard(mode: str = "classic", limit: int = Query(50, ge=1, le=100)):
     mode = mode if mode in VALID_MODES else "classic"
     db = SessionLocal()
     try:

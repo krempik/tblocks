@@ -4,8 +4,8 @@
     "description": "Продвинутый Tetris++ с боссами, powerups и лидербордом",
     "start_url": "./index.html",
     "display": "standalone",
-    "background_color": "#0a0a0a",
-    "theme_color": "#00ff41",
+    "background_color": "#0a0a12",
+    "theme_color": "#0a0a12",
     "orientation": "portrait",
     "icons": [
         {

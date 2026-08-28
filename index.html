@@ -7,7 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0a0a12">
 <link rel="manifest" href="manifest.json">
-<title>T-Blocks v2.0 — 4ayka Studio</title>
+<title>T-Blocks v4.0.0 — 4ayka Studio</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 :root{
@@ -189,7 +189,7 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
       <div id="powerups-list"></div>
     </div>
     <div class="panel" style="text-align:center">
-      <div class="sub version-static">T-BLOCKS v2.0.1</div>
+      <div class="sub version-static">T-BLOCKS v4.0.0</div>
       <div class="sub">4ayka Studio</div>
     </div>
   </div>
@@ -204,7 +204,7 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
 <div id="mode-select">
   <h1>T-BLOCKS</h1>
   <div class="studio">4ayka Studio</div>
-  <div class="version-static" style="font-size:11px;color:var(--muted);margin-bottom:8px">v2.0.1</div>
+  <div class="version-static" style="font-size:11px;color:var(--muted);margin-bottom:8px">v4.0.0</div>
   <div class="modes">
     <div class="mode-btn" onclick="startGame('classic')">
       <div class="mode-name">Классический</div>
@@ -374,7 +374,7 @@ const POWERUP_TYPES=[
 ];
 
 const ACHIEVEMENTS=[
-  {id:'first_clear',icon:'✨',name:'Первая blood',desc:'Очисти первую линию'},
+  {id:'first_clear',icon:'✨',name:'Первая кровь',desc:'Очисти первую линию'},
   {id:'combo_5',icon:'🔥',name:'Комбо-мастер',desc:'Набери комбо x5'},
   {id:'combo_10',icon:'💥',name:'Комбо-бог',desc:'Набери комбо x10'},
   {id:'boss_slayer',icon:'🗡️',name:'Убийца боссов',desc:'Победи любого босса'},
@@ -521,8 +521,7 @@ function clearLines(){
   }
 
   checkAchievements();
-  if(cleared.length>=4)unlockAch('first_clear');
-  else if(G.lines>=1)unlockAch('first_clear');
+  if(cleared.length>=1)unlockAch('first_clear');
 }
 
 function spawnPiece(){
@@ -641,12 +640,7 @@ function updateBoss(){
   document.getElementById('boss-name').textContent=G.boss.name;
 }
 
-const THEME_COLORS={
-  matrix:{bg:'#0d0d18',grid:'#1a1a28'},
-  neon:{bg:'#0d001f',grid:'#2a0040'},
-  retro:{bg:'#1a0d00',grid:'#2a1a00'},
-  mono:{bg:'#111',grid:'#1a1a1a'},
-};
+const THEME_COLORS=THEMES;
 
 function draw(){
   let tc=THEME_COLORS[currentTheme]||THEME_COLORS.matrix;

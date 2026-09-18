@@ -4,18 +4,21 @@ import json
 import subprocess
 import threading
 import re
+import logging
 from typing import Optional
 from functools import lru_cache
-from contextlib import contextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query, Request, HTTPException
+from fastapi import FastAPI, Query, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
 from sqlalchemy import create_engine, Column, Integer, String, DateTime, func, Index
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
+
+log = logging.getLogger("tblocks")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 DB_PATH = os.path.join(os.path.dirname(__file__), "leaderboard.db")
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False}, pool_pre_ping=True)
@@ -23,11 +26,18 @@ SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
 
 VERSION_FILE = Path(__file__).parent / "VERSION"
+
+
 def get_version():
     try:
         return VERSION_FILE.read_text().strip()
-    except Exception:
-        return "4.0.0"
+    except Exception as exc:
+        log.warning("could not read VERSION file (%s); using default", exc)
+        return "4.1.0"
+
+
+# Only honour X-Forwarded-For when we actually sit behind a trusted proxy.
+TRUST_PROXY = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
 
 _rate_limit_lock = threading.Lock()
 _visitor_lock = threading.Lock()
@@ -57,7 +67,17 @@ class VisitorLog(Base):
     timestamp = Column(DateTime, default=lambda: datetime.now(timezone.utc), index=True)
 
 
-Base.metadata.create_all(bind=engine)
+def ensure_schema() -> None:
+    """Schema DDL runs on startup (lifespan), not at module import."""
+    Base.metadata.create_all(bind=engine)
+
+
+def get_db():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
 TUNNEL_URL: Optional[str] = None
@@ -88,7 +108,7 @@ def _check_rate_limit(client_ip: str) -> bool:
 
 def _get_client_ip(request: Request) -> str:
     forwarded = request.headers.get("X-Forwarded-For")
-    if forwarded:
+    if TRUST_PROXY and forwarded:
         return forwarded.split(",")[0].strip()
     return request.client.host if request.client else "unknown"
 
@@ -144,16 +164,18 @@ def _stop_tunnel():
         try:
             _tunnel_process.terminate()
             _tunnel_process.wait(timeout=3)
-        except Exception:
+        except Exception as exc:
+            log.warning("tunnel terminate failed: %s", exc)
             try:
                 _tunnel_process.kill()
-            except Exception:
-                pass
+            except Exception as exc2:
+                log.warning("tunnel kill failed: %s", exc2)
         _tunnel_process = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    ensure_schema()
     _start_tunnel()
     print("[*] T-Blocks Leaderboard started on http://localhost:8001")
     yield
@@ -218,84 +240,68 @@ VALID_MODES = ("classic", "marathon", "boss", "ultra")
 
 
 @app.post("/api/score")
-def submit_score(req: ScoreRequest):
-    db = SessionLocal()
-    try:
-        s = Score(name=req.name, mode=req.mode, score=req.score, lines=req.lines, level=req.level)
-        db.add(s)
-        db.commit()
+def submit_score(req: ScoreRequest, db: Session = Depends(get_db)):
+    s = Score(name=req.name, mode=req.mode, score=req.score, lines=req.lines, level=req.level)
+    db.add(s)
+    db.commit()
 
-        position = db.query(func.count(Score.id)).filter(
-            Score.mode == req.mode,
-            Score.score > req.score,
-        ).scalar() + 1
+    position = db.query(func.count(Score.id)).filter(
+        Score.mode == req.mode,
+        Score.score > req.score,
+    ).scalar() + 1
 
-        return {"ok": True, "position": position, "id": s.id}
-    finally:
-        db.close()
+    return {"ok": True, "position": position, "id": s.id}
 
 
 @app.get("/api/leaderboard")
-def get_leaderboard(mode: str = "classic", limit: int = Query(50, ge=1, le=100)):
+def get_leaderboard(mode: str = "classic", limit: int = Query(50, ge=1, le=100), db: Session = Depends(get_db)):
     mode = mode if mode in VALID_MODES else "classic"
-    db = SessionLocal()
-    try:
-        rows = (
-            db.query(Score)
-            .filter(Score.mode == mode)
-            .order_by(Score.score.desc())
-            .limit(limit)
-            .all()
-        )
-        return [
-            {
-                "rank": i + 1,
-                "name": r.name,
-                "score": r.score,
-                "lines": r.lines,
-                "level": r.level,
-                "date": r.created_at.isoformat() if r.created_at else None,
-            }
-            for i, r in enumerate(rows)
-        ]
-    finally:
-        db.close()
+    rows = (
+        db.query(Score)
+        .filter(Score.mode == mode)
+        .order_by(Score.score.desc())
+        .limit(limit)
+        .all()
+    )
+    return [
+        {
+            "rank": i + 1,
+            "name": r.name,
+            "score": r.score,
+            "lines": r.lines,
+            "level": r.level,
+            "date": r.created_at.isoformat() if r.created_at else None,
+        }
+        for i, r in enumerate(rows)
+    ]
 
 
 @app.get("/api/leaderboard/position")
-def get_position(mode: str, score: int):
+def get_position(mode: str, score: int, db: Session = Depends(get_db)):
     mode = mode if mode in VALID_MODES else "classic"
     score = max(0, score)
-    db = SessionLocal()
-    try:
-        position = db.query(func.count(Score.id)).filter(
-            Score.mode == mode,
-            Score.score > score,
-        ).scalar() + 1
-        total = db.query(func.count(Score.id)).filter(Score.mode == mode).scalar()
-        return {"position": position, "total": total}
-    finally:
-        db.close()
+    position = db.query(func.count(Score.id)).filter(
+        Score.mode == mode,
+        Score.score > score,
+    ).scalar() + 1
+    total = db.query(func.count(Score.id)).filter(Score.mode == mode).scalar()
+    return {"position": position, "total": total}
 
 
 @app.get("/api/stats")
-def get_stats():
-    db = SessionLocal()
-    try:
-        total_games = db.query(func.count(Score.id)).scalar() or 0
-        total_players = db.query(func.count(func.distinct(Score.name))).scalar() or 0
-        best_scores = {}
-        for mode in VALID_MODES:
-            row = db.query(func.max(Score.score)).filter(Score.mode == mode).scalar()
-            best_scores[mode] = row or 0
-        return {
-            "total_games": total_games,
-            "total_players": total_players,
-            "best_scores": best_scores,
-            "uptime_seconds": int(time.time() - HOST_START_TIME),
-        }
-    finally:
-        db.close()
+def get_stats(db: Session = Depends(get_db)):
+    total_games = db.query(func.count(Score.id)).scalar() or 0
+    total_players = db.query(func.count(func.distinct(Score.name))).scalar() or 0
+    best_scores = {}
+    for mode in VALID_MODES:
+        row = db.query(func.max(Score.score)).filter(Score.mode == mode).scalar()
+        best_scores[mode] = row or 0
+    return {
+        "total_games": total_games,
+        "total_players": total_players,
+        "best_scores": best_scores,
+        "uptime_seconds": int(time.time() - HOST_START_TIME),
+    }
 
 
 @app.get("/api/tunnel-url")
@@ -312,7 +318,7 @@ _ONLINE_TIMEOUT = 60
 
 
 @app.post("/api/visit")
-def record_visit(request: Request, page: str = "/", ip: str = ""):
+def record_visit(request: Request, page: str = "/", ip: str = "", db: Session = Depends(get_db)):
     global _visitors_today, _visitors_date
     client_ip = ip or _get_client_ip(request)
     page = page[:128]
@@ -322,26 +328,18 @@ def record_visit(request: Request, page: str = "/", ip: str = ""):
             _visitors_today = 0
             _visitors_date = today
         _visitors_today += 1
-        db = SessionLocal()
-        try:
-            db.add(VisitorLog(ip=client_ip[:64], page=page))
-            db.commit()
-        finally:
-            db.close()
+        db.add(VisitorLog(ip=client_ip[:64], page=page))
+        db.commit()
     return {"ok": True, "visitors_today": _visitors_today}
 
 
 @app.get("/api/visitors")
-def get_visitors():
+def get_visitors(db: Session = Depends(get_db)):
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    db = SessionLocal()
-    try:
-        total = db.query(func.count(VisitorLog.id)).scalar() or 0
-        today_count = db.query(func.count(VisitorLog.id)).filter(
-            func.date(VisitorLog.timestamp) == today
-        ).scalar() or 0
-    finally:
-        db.close()
+    total = db.query(func.count(VisitorLog.id)).scalar() or 0
+    today_count = db.query(func.count(VisitorLog.id)).filter(
+        func.date(VisitorLog.timestamp) == today
+    ).scalar() or 0
     return {"total": total, "today": today_count}
 
 

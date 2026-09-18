@@ -204,29 +204,29 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
 <div id="mode-select">
   <h1>T-BLOCKS</h1>
   <div class="studio">4ayka Studio</div>
-  <div class="version-static" style="font-size:11px;color:var(--muted);margin-bottom:8px">v4.0.0</div>
+  <div class="version-static" style="font-size:11px;color:var(--muted);margin-bottom:8px">v4.1.0</div>
   <div class="modes">
-    <div class="mode-btn" onclick="startGame('classic')">
+    <div class="mode-btn" data-action="start" data-mode="classic">
       <div class="mode-name">Классический</div>
       <div class="mode-desc">Тетрис как ты его знаешь, но лучше. Комбо, бонусы, вызов.</div>
     </div>
-    <div class="mode-btn" onclick="startGame('marathon')">
+    <div class="mode-btn" data-action="start" data-mode="marathon">
       <div class="mode-name">Марафон</div>
       <div class="mode-desc">Бесконечный режим. Скорость растёт. Держись как можно дольше!</div>
     </div>
-    <div class="mode-btn" onclick="startGame('boss')">
+    <div class="mode-btn" data-action="start" data-mode="boss">
       <div class="mode-name">Битва с Боссом</div>
       <div class="mode-desc">Уничтожай линии, чтобы нанести урон боссу. Он отвечает!</div>
     </div>
-    <div class="mode-btn" onclick="startGame('ultra')">
+    <div class="mode-btn" data-action="start" data-mode="ultra">
       <div class="mode-name">Ультра</div>
       <div class="mode-desc">2 минуты. Максимум очков. Бонусы падают чаще.</div>
     </div>
   </div>
   <div class="menu-extras">
-    <div class="mode-btn" onclick="showStats()">📊 Статистика</div>
-    <div class="mode-btn" onclick="showAchievements()">🏆 Достижения</div>
-    <div class="mode-btn" onclick="showThemes()">🎨 Темы</div>
+    <div class="mode-btn" data-action="stats">📊 Статистика</div>
+    <div class="mode-btn" data-action="achievements">🏆 Достижения</div>
+    <div class="mode-btn" data-action="themes">🎨 Темы</div>
   </div>
 </div>
 
@@ -234,8 +234,8 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
   <h2 id="overlay-title">ИГРА ОКОНЧЕНА</h2>
   <div class="stats" id="overlay-stats"></div>
   <div id="lb-position" style="display:none;text-align:center;font-size:13px;color:var(--accent2);margin:8px 0"></div>
-  <button onclick="showMenu()">В МЕНЮ</button>
-  <button onclick="restartGame()">ЗАНОВО</button>
+  <button data-action="menu">В МЕНЮ</button>
+  <button data-action="restart">ЗАНОВО</button>
 </div>
 
 <div id="stats-panel" class="menu-panel">
@@ -255,24 +255,24 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
     <div><span>Босс</span><span id="s-best-boss">0</span></div>
     <div><span>Ультра</span><span id="s-best-ultra">0</span></div>
   </div>
-  <button class="mode-btn" onclick="closePanels()" style="margin-top:16px;width:200px;text-align:center">← НАЗАД</button>
+  <button class="mode-btn" data-action="back" style="margin-top:16px;width:200px;text-align:center">← НАЗАД</button>
 </div>
 
 <div id="achievements-panel" class="menu-panel">
   <h2>🏆 ДОСТИЖЕНИЯ</h2>
   <div class="ach-grid" id="ach-grid"></div>
-  <button class="mode-btn" onclick="closePanels()" style="margin-top:16px;width:200px;text-align:center">← НАЗАД</button>
+  <button class="mode-btn" data-action="back" style="margin-top:16px;width:200px;text-align:center">← НАЗАД</button>
 </div>
 
 <div id="themes-panel" class="menu-panel">
   <h2>🎨 ТЕМЫ</h2>
   <div class="theme-options">
-    <div class="theme-btn" id="th-matrix" onclick="setTheme('matrix')"><div class="theme-preview matrix"></div>Matrix</div>
-    <div class="theme-btn" id="th-neon" onclick="setTheme('neon')"><div class="theme-preview neon"></div>Neon</div>
-    <div class="theme-btn" id="th-retro" onclick="setTheme('retro')"><div class="theme-preview retro"></div>Retro</div>
-    <div class="theme-btn" id="th-mono" onclick="setTheme('mono')"><div class="theme-preview mono"></div>Mono</div>
+    <div class="theme-btn" id="th-matrix" data-action="theme" data-theme="matrix"><div class="theme-preview matrix"></div>Matrix</div>
+    <div class="theme-btn" id="th-neon" data-action="theme" data-theme="neon"><div class="theme-preview neon"></div>Neon</div>
+    <div class="theme-btn" id="th-retro" data-action="theme" data-theme="retro"><div class="theme-preview retro"></div>Retro</div>
+    <div class="theme-btn" id="th-mono" data-action="theme" data-theme="mono"><div class="theme-preview mono"></div>Mono</div>
   </div>
-  <button class="mode-btn" onclick="closePanels()" style="margin-top:16px;width:200px;text-align:center">← НАЗАД</button>
+  <button class="mode-btn" data-action="back" style="margin-top:16px;width:200px;text-align:center">← НАЗАД</button>
 </div>
 
 <div id="touch-controls">
@@ -397,8 +397,10 @@ let G={
   running:false,paused:false,gameOver:false,
   particles:[],screenShake:0,ultraTime:120,ultraActive:false,spawnCount:0,
   powerupsUsed:new Set(),quadClears:0,gameStartTime:0,
-  usedPowerupsThisGame:false,
+  usedPowerupsThisGame:false,_acc:0,
 };
+
+const STEP_MS=1000/60;
 
 let stats={games:0,wins:0,totalScore:0,totalTime:0,totalLines:0,maxCombo:0,best:{classic:0,marathon:0,boss:0,ultra:0},modesPlayed:[]};
 try{let s=localStorage.getItem('tblocks_stats');if(s)stats={...stats,...JSON.parse(s)}}catch(e){}
@@ -727,17 +729,29 @@ function showToast(text){
 let lastTime=0;
 function gameLoop(timestamp){
   if(!G.running){requestAnimationFrame(gameLoop);return}
-  let dt=Math.min(timestamp-lastTime,100);lastTime=timestamp;
+  let dt=Math.min(timestamp-lastTime,250);lastTime=timestamp;
   if(!G.paused){
-    G.timer+=dt;
-    if(G.frozen){G.frozenTimer--;if(G.frozenTimer<=0)G.frozen=false}
-    if(!G.frozen&&G.piece){G.dropTimer+=dt;if(G.dropTimer>=G.dropInterval){G.dropTimer=0;moveDown()}}
-    if(G.ultraActive){G.ultraTime-=dt/1000;if(G.ultraTime<=0){G.ultraTime=0;gameOverFunc()}}
-    if(G.mode==='boss')updateBoss();
+    G._acc+=dt;
+    while(G._acc>=STEP_MS){
+      G._acc-=STEP_MS;
+      G.timer+=STEP_MS;
+      if(G.frozen){G.frozenTimer--;if(G.frozenTimer<=0)G.frozen=false}
+      if(!G.frozen&&G.piece){G.dropTimer+=STEP_MS;if(G.dropTimer>=G.dropInterval){G.dropTimer=0;moveDown()}}
+      if(G.ultraActive){G.ultraTime-=STEP_MS/1000;if(G.ultraTime<=0){G.ultraTime=0;gameOverFunc()}}
+      if(G.mode==='boss')updateBoss();
+    }
     updateParticles();draw();updateUI();
+  } else {
+    G._acc=0;
   }
   requestAnimationFrame(gameLoop);
 }
+
+// pause when the tab is hidden so the fixed-step accumulator never
+// burst-fires after the player comes back
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden&&G.running&&!G.gameOver)G.paused=true;
+});
 
 const keys={};
 let lastRotateTime=0;
@@ -765,6 +779,21 @@ canvas.addEventListener('click',e=>{
     let y=(e.clientY-rect.top)*(canvas.height/rect.height);
     handleBombClick(x,y);
   }
+});
+
+// single delegated click handler for all [data-action] controls
+document.addEventListener('click',e=>{
+  const el=e.target.closest('[data-action]');
+  if(!el)return;
+  const action=el.dataset.action;
+  if(action==='start')startGame(el.dataset.mode||'classic');
+  else if(action==='stats')showStats();
+  else if(action==='achievements')showAchievements();
+  else if(action==='themes')showThemes();
+  else if(action==='menu')showMenu();
+  else if(action==='restart')restartGame();
+  else if(action==='back')closePanels();
+  else if(action==='theme')setTheme(el.dataset.theme);
 });
 
 let touchHoldInterval=null,heldAction=null;
@@ -864,15 +893,6 @@ async function submitScore(){
     let data=await resp.json();
     return data.position||null;
   }catch(e){return null}
-}
-
-async function fetchLeaderboard(mode){
-  if(!API_URL)return[];
-  try{
-    let resp=await fetch(API_URL+`/api/leaderboard?mode=${mode}&limit=10`);
-    if(!resp.ok)return[];
-    return await resp.json();
-  }catch(e){return[]}
 }
 
 function startGame(mode){

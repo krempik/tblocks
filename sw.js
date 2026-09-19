@@ -1,4 +1,4 @@
-const CACHE_NAME = 'tblocks-v2';
+const CACHE_NAME = 'tblocks-v4.1.0';
 const ASSETS = [
     './',
     './index.html',
@@ -23,7 +23,11 @@ self.addEventListener('activate', e => {
 
 self.addEventListener('fetch', e => {
     if (e.request.url.includes('/api/')) return;
+    // Network-first for page navigations so deploys reach players, with the
+    // cache as offline fallback. Other assets stay cache-first.
     e.respondWith(
-        caches.match(e.request).then(r => r || fetch(e.request))
+        e.request.mode === 'navigate'
+            ? fetch(e.request).catch(() => caches.match(e.request))
+            : caches.match(e.request).then(r => r || fetch(e.request))
     );
 });

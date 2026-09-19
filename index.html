@@ -7,7 +7,7 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#0a0a12">
 <link rel="manifest" href="manifest.json">
-<title>T-Blocks v4.0.0 — 4ayka Studio</title>
+<title>T-Blocks v4.1.0 — 4ayka Studio</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
 :root{
@@ -41,6 +41,10 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
 .mode-btn{background:linear-gradient(135deg,var(--panel),var(--panel2));border:2px solid var(--border);border-radius:10px;padding:14px 18px;color:var(--text);cursor:pointer;transition:all .2s;text-align:left}
 .mode-btn:active{transform:scale(0.97);border-color:var(--primary)}
 .mode-btn .mode-name{font-size:clamp(15px,4vw,18px);font-weight:bold;margin-bottom:3px}
+.nick-input{margin:14px auto 4px;display:flex;flex-direction:column;gap:6px;max-width:400px;text-align:left}
+.nick-input label{font-size:12px;color:var(--muted)}
+.nick-input input{background:var(--bg);border:1px solid var(--border);color:var(--text);padding:8px 12px;border-radius:8px;font-size:15px;width:100%;box-sizing:border-box;outline:none}
+.nick-input input:focus{border-color:var(--accent)}
 .mode-btn .mode-desc{font-size:11px;color:var(--dim)}
 .menu-extras{display:flex;gap:8px;width:100%;max-width:320px;margin-top:8px}
 .menu-extras .mode-btn{flex:1;text-align:center;padding:10px 8px;font-size:12px}
@@ -189,7 +193,7 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
       <div id="powerups-list"></div>
     </div>
     <div class="panel" style="text-align:center">
-      <div class="sub version-static">T-BLOCKS v4.0.0</div>
+      <div class="sub version-static">T-BLOCKS v4.1.0</div>
       <div class="sub">4ayka Studio</div>
     </div>
   </div>
@@ -205,6 +209,10 @@ canvas{border:2px solid var(--border);border-radius:4px;image-rendering:pixelate
   <h1>T-BLOCKS</h1>
   <div class="studio">4ayka Studio</div>
   <div class="version-static" style="font-size:11px;color:var(--muted);margin-bottom:8px">v4.1.0</div>
+  <div class="nick-input">
+    <label for="player-name">Ник для таблицы лидеров:</label>
+    <input id="player-name" type="text" maxlength="32" placeholder="Player" autocomplete="nickname">
+  </div>
   <div class="modes">
     <div class="mode-btn" data-action="start" data-mode="classic">
       <div class="mode-name">Классический</div>
@@ -886,14 +894,25 @@ canvas.addEventListener('touchend',e=>{
 
 async function submitScore(){
   if(!API_URL)return null;
+  var nick=document.getElementById('player-name');
+  var name=(nick&&nick.value.trim())||'Player';
   try{
     let resp=await fetch(API_URL+'/api/score',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({name:'Player',mode:G.mode,score:G.score,lines:G.lines,level:G.level})});
+      body:JSON.stringify({name:name,mode:G.mode,score:G.score,lines:G.lines,level:G.level})});
     if(!resp.ok)return null;
     let data=await resp.json();
     return data.position||null;
   }catch(e){return null}
 }
+
+(function initNick(){
+  var el=document.getElementById('player-name');
+  if(!el) return;
+  try{el.value=localStorage.getItem('tblocks_nick')||''}catch(e){/* storage off */}
+  el.addEventListener('input',function(){
+    try{localStorage.setItem('tblocks_nick',el.value)}catch(e){/* storage off */}
+  });
+})();
 
 function startGame(mode){
   ensureAudio();

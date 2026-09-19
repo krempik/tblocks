@@ -12,7 +12,7 @@ from pathlib import Path
 from fastapi import FastAPI, Query, Request, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, field_validator
-from sqlalchemy import create_engine, Column, Integer, String, DateTime, func, Index
+from sqlalchemy import create_engine, Column, Integer, String, DateTime, func, Index, text
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
@@ -20,7 +20,8 @@ from contextlib import asynccontextmanager
 log = logging.getLogger("tblocks")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "leaderboard.db")
+# Overridable so tests run against an isolated temp database.
+DB_PATH = os.environ.get("TBLOCKS_DB", os.path.join(os.path.dirname(__file__), "leaderboard.db"))
 engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False}, pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine)
 Base = declarative_base()
@@ -40,7 +41,6 @@ def get_version():
 TRUST_PROXY = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
 
 _rate_limit_lock = threading.Lock()
-_visitor_lock = threading.Lock()
 _online_lock = threading.Lock()
 
 
@@ -52,10 +52,12 @@ class Score(Base):
     score = Column(Integer, nullable=False)
     lines = Column(Integer, default=0)
     level = Column(Integer, default=1)
+    ip = Column(String(64), default="")
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     __table_args__ = (
         Index("ix_scores_mode_score", "mode", "score"),
+        Index("ix_scores_ip_name_mode", "ip", "name", "mode"),
     )
 
 
@@ -70,6 +72,21 @@ class VisitorLog(Base):
 def ensure_schema() -> None:
     """Schema DDL runs on startup (lifespan), not at module import."""
     Base.metadata.create_all(bind=engine)
+    _ensure_column("scores", "ip VARCHAR(64) DEFAULT ''")
+
+
+def _ensure_column(table: str, column_def: str) -> None:
+    """Add a column to an existing table (SQLite ALTER) if it is missing."""
+    target = column_def.split()[0]
+    try:
+        with engine.connect() as conn:
+            cols = [row[1] for row in conn.execute(text(f"PRAGMA table_info({table})"))]
+            if target not in cols:
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {column_def}"))
+                conn.commit()
+                log.info("migrated %s: added column %s", table, target)
+    except Exception as exc:
+        log.error("schema migration for %s.%s failed: %s", table, target, exc)
 
 
 def get_db():
@@ -86,7 +103,7 @@ HOST_START_TIME = time.time()
 
 _rate_limit_store: dict[str, list[float]] = {}
 _RATE_LIMIT_WINDOW = 60
-_RATE_LIMIT_MAX_REQUESTS = 60
+_RATE_LIMIT_MAX_REQUESTS = int(os.environ.get("TBLOCKS_RATE_LIMIT", "60"))
 
 
 def _check_rate_limit(client_ip: str) -> bool:
@@ -237,20 +254,55 @@ class ScoreRequest(BaseModel):
 
 
 VALID_MODES = ("classic", "marathon", "boss", "ultra")
+MAX_ROWS_PER_MODE = int(os.environ.get("TBLOCKS_MAX_ROWS", "500"))
+
+
+def _position_of(db: Session, mode: str, score: int) -> int:
+    return db.query(func.count(Score.id)).filter(
+        Score.mode == mode,
+        Score.score > score,
+    ).scalar() + 1
+
+
+def _trim_leaderboard(db: Session, mode: str) -> None:
+    keep_ids = [
+        row[0]
+        for row in db.query(Score.id)
+        .filter(Score.mode == mode)
+        .order_by(Score.score.desc())
+        .limit(MAX_ROWS_PER_MODE)
+        .all()
+    ]
+    db.query(Score).filter(
+        Score.mode == mode,
+        Score.id.notin_(keep_ids),
+    ).delete(synchronize_session=False)
 
 
 @app.post("/api/score")
-def submit_score(req: ScoreRequest, db: Session = Depends(get_db)):
-    s = Score(name=req.name, mode=req.mode, score=req.score, lines=req.lines, level=req.level)
-    db.add(s)
+def submit_score(req: ScoreRequest, request: Request, db: Session = Depends(get_db)):
+    client_ip = _get_client_ip(request)
+    existing = (
+        db.query(Score)
+        .filter(Score.ip == client_ip, Score.name == req.name, Score.mode == req.mode)
+        .first()
+    )
+    if existing is not None:
+        if req.score <= existing.score:
+            db.rollback()
+            return {"ok": True, "position": _position_of(db, req.mode, req.score), "id": existing.id, "best": True}
+        existing.score, existing.lines, existing.level = req.score, req.lines, req.level
+        existing.created_at = datetime.now(timezone.utc)
+        entry = existing
+    else:
+        entry = Score(name=req.name, mode=req.mode, score=req.score, lines=req.lines, level=req.level, ip=client_ip)
+        db.add(entry)
+
+    db.commit()
+    _trim_leaderboard(db, req.mode)
     db.commit()
 
-    position = db.query(func.count(Score.id)).filter(
-        Score.mode == req.mode,
-        Score.score > req.score,
-    ).scalar() + 1
-
-    return {"ok": True, "position": position, "id": s.id}
+    return {"ok": True, "position": _position_of(db, req.mode, req.score), "id": entry.id}
 
 
 @app.get("/api/leaderboard")
@@ -311,26 +363,21 @@ def get_tunnel_url():
 
 # ---- VISITOR COUNTER & ONLINE ----
 
-_visitors_today = 0
-_visitors_date = ""
 _online_users: dict[str, float] = {}
 _ONLINE_TIMEOUT = 60
 
 
 @app.post("/api/visit")
 def record_visit(request: Request, page: str = "/", ip: str = "", db: Session = Depends(get_db)):
-    global _visitors_today, _visitors_date
     client_ip = ip or _get_client_ip(request)
     page = page[:128]
+    db.add(VisitorLog(ip=client_ip[:64], page=page))
+    db.commit()
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    with _visitor_lock:
-        if _visitors_date != today:
-            _visitors_today = 0
-            _visitors_date = today
-        _visitors_today += 1
-        db.add(VisitorLog(ip=client_ip[:64], page=page))
-        db.commit()
-    return {"ok": True, "visitors_today": _visitors_today}
+    today_count = db.query(func.count(VisitorLog.id)).filter(
+        func.date(VisitorLog.timestamp) == today
+    ).scalar() or 0
+    return {"ok": True, "visitors_today": today_count}
 
 
 @app.get("/api/visitors")
